@@ -1309,6 +1309,21 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
       }
     });
 
+    ws.on("unexpected-response", (request, response) => {
+      logError(`[WSS] @${channel.username} Unexpected ${response.statusCode}`);
+      let body = "";
+      response.on("data", (chunk) => {
+        body += chunk;
+      });
+      response.on("end", () => {
+        if (body.length > 0) {
+          logError(
+            `[WSS] @${channel.username} Body: ${body.substring(0, 500)}`,
+          );
+        }
+      });
+    });
+
     ws.on("error", (err) => {
       logError(`[WSS] ${channel.username} Lỗi: ${err.message}`);
       stopWebcast(channel.username);
