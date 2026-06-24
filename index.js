@@ -1311,6 +1311,7 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
 
     ws.on("unexpected-response", (request, response) => {
       logError(`[WSS] @${channel.username} Unexpected ${response.statusCode}`);
+      logError(`[WSS] Headers: ${JSON.stringify(response.headers)}`);
       let body = "";
       response.on("data", (chunk) => {
         body += chunk;
