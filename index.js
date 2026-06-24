@@ -900,7 +900,6 @@ async function executeTask(channel) {
     let rawStatus = await checkLiveStatus(channel.username, checkProxy);
     let status = rawStatus;
     let fetchedRoomId = null;
-    console.log(channel.username + " | " + status);
     // 💡 BẢN VÁ: Tách "LIVE" và "roomId" ra
     if (typeof rawStatus === "string" && rawStatus.startsWith("LIVE|")) {
       status = "LIVE";
@@ -978,7 +977,6 @@ async function executeTask(channel) {
       });
     }
   } catch (e) {
-    console.log("Lỗi check live");
     if (checkProxy !== "local") proxyCooldown[checkProxy] = Date.now() + 30000;
     else proxyCooldown["local"] = Date.now() + 30000;
     setTimeout(() => {
@@ -1064,7 +1062,7 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
     const generatedHeaders = headerGenerator.getHeaders();
     let channelUA =
       generatedHeaders["user-agent"] ||
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/120.0.0.0";
 
     const catchTreasureBox = (
       data,
@@ -1073,9 +1071,6 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
       roomId,
       currentViewers,
     ) => {
-      console.log(
-        `[DEBUG CHEST RAW] ${msgName} từ ${channel.username}: LENGTH ${JSON.stringify(data).length}`,
-      );
       const boxData = data?.envelopeInfo || data?.treasureBoxData || data;
       const coins =
         boxData?.diamondCount || boxData?.coin || boxData?.coins || 0;
@@ -1086,9 +1081,6 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
       if (bType === 1 || String(bType) === "1") boxType = "ruong";
       else if (bType === 4 || String(bType) === "4") boxType = "ruong_vang";
       if (coins <= 15) return;
-      console.log(
-        `${boxType === "tui" ? "💰 TÚI" : boxType === "ruong_vang" ? "🏆 RƯƠNG VÀNG" : "📦 RƯƠNG"} (${coins}/${boxes}) - từ ${channel.username}`,
-      );
       if (activeConnections[channel.username])
         activeConnections[channel.username].lastActive = Date.now();
       let originTimeMs = Date.now();
@@ -1236,9 +1228,6 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
     });
 
     ws.on("message", (data) => {
-      console.log(
-        `[RAW WS DATA] ${channel.username}: received ${data.length} bytes`,
-      );
       try {
         const frame = proto.WebcastPushFrame.decode(new Uint8Array(data));
         if (frame.payloadType === "msg") {
@@ -1352,7 +1341,6 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
 }
 
 function stopWebcast(user) {
-  console.log("[DEBUG] stopWebcast called for", user);
   const realProxy = assignedProxies[user];
   if (realProxy) {
     proxyUsage[realProxy] = Math.max(0, (proxyUsage[realProxy] || 0) - 1);
