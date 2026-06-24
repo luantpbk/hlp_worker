@@ -1126,9 +1126,12 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
         if (initialEnvData.cursor) cursor = initialEnvData.cursor;
         if (initialEnvData.internal_ext)
           internalExt = initialEnvData.internal_ext;
-        if (initialEnvData.userAgent) channelUA = initialEnvData.userAgent;
-        if (initialEnvData.cookies) cookieStr = initialEnvData.cookies;
-        if (initialEnvData.ws_url) wsUrl = initialEnvData.ws_url;
+        if (initialEnvData.userAgent) channelUA = initialEnvData.userAgent.replace(/\r?\n|\r/g, '').trim();
+        if (initialEnvData.cookies) cookieStr = initialEnvData.cookies.replace(/\r?\n|\r/g, '').trim();
+        if (initialEnvData.ws_url) {
+          wsUrl = initialEnvData.ws_url.trim();
+          wsUrl = wsUrl.replace(/^https/i, "wss").replace(/^http/i, "ws");
+        }
         logSuccess(
           `[WSS] Đã lấy được ws_url và Cookies từ Master cho ${cleanName}`,
         );
