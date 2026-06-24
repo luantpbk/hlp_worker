@@ -1310,19 +1310,21 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
     });
 
     ws.on("unexpected-response", (request, response) => {
-      logError(`[WSS] @${channel.username} Unexpected ${response.statusCode}`);
-      logError(`[WSS] Headers: ${JSON.stringify(response.headers)}`);
-      let body = "";
-      response.on("data", (chunk) => {
-        body += chunk;
-      });
-      response.on("end", () => {
-        if (body.length > 0) {
-          logError(
-            `[WSS] @${channel.username} Body: ${body.substring(0, 500)}`,
-          );
+      const msg = response.headers["handshake-msg"] || `Unexpected ${response.statusCode}`;
+      logError(`[WSS] @${channel.username} Bị từ chối kết nối: ${msg}`);
+      
+      request.abort();
+      stopWebcast(channel.username);
+      
+      // Nếu proxy lỗi thì tăng biến đếm
+      if (proxy && proxy !== "local") {
+        proxyFailCount[proxy] = (proxyFailCount[proxy] || 0) + 1;
+        if (proxyFailCount[proxy] >= 5 && proxyHealth[proxy]) {
+          proxyHealth[proxy].status = "LỖI KẾT NỐI LIÊN TỤC";
+          proxyCooldown[proxy] = Date.now() + 180000;
         }
-      });
+      }
+      setTimeout(() => safeEmitRadarResult({ channel, status: "REQUEUE" }), 3000);
     });
 
     ws.on("error", (err) => {
