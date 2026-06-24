@@ -419,7 +419,10 @@ function requestSignFromMaster(username, proxy) {
         clearTimeout(timeoutHandle);
         masterSocket.off("worker_receive_sign", listener);
         if (response.error) reject(new Error(response.error));
-        else resolve(response.data);
+        else {
+          response.data.reqId = reqId; // Lưu lại reqId để báo cáo khi ngắt
+          resolve(response.data);
+        }
       }
     };
 
@@ -956,23 +959,11 @@ async function executeTask(channel) {
     }
 
     if (status === "LIVE") {
-      const socketProxy = getNextAvailableProxy();
-      if (!socketProxy) {
-        logWarn("Không còn Proxy để thực hiện");
-        safeEmitRadarResult({ channel, status: "REQUEUE" });
-        return;
-      }
-      safeEmitRadarResult({ channel, status: "LIVE", proxy: socketProxy });
-      delete proxyFailCount[socketProxy];
-      delete proxyCooldown[socketProxy];
-      if (proxyHealth[socketProxy])
-        proxyHealth[socketProxy].status = "SẴN SÀNG";
-      proxyUsage[socketProxy] = (proxyUsage[socketProxy] || 0) + 1;
-      assignedProxies[channel.username] = socketProxy;
+      safeEmitRadarResult({ channel, status: "LIVE" });
       connectionLocks.set(channel.username, Date.now());
       connectionQueue.push({
         channel,
-        proxy: socketProxy,
+        proxy: "master", // Sẽ lấy từ Master
         roomId: fetchedRoomId,
       });
     }
@@ -1023,23 +1014,61 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
     `Bắt đầu WSS (Thuần WebSocket) socket ${channel.username} qua Local Sign`,
   );
   try {
+    const cleanName = channel.username.startsWith("@")
+      ? channel.username.slice(1)
+      : channel.username;
+
+    let initialEnvData;
+    let cookieStr = "";
+    let wsUrl = "";
+    let masterProxy = "";
+    
+    try {
+      logInfo(`[WSS] Đang xin Cookie và EnvData từ Master cho ${cleanName}...`);
+      initialEnvData = await requestSignFromMaster(cleanName, "");
+      if (initialEnvData) {
+        if (initialEnvData.cursor) cursor = initialEnvData.cursor;
+        if (initialEnvData.internal_ext) internalExt = initialEnvData.internal_ext;
+        if (initialEnvData.userAgent) channelUA = initialEnvData.userAgent.replace(/\r?\n|\r/g, '').trim();
+        if (initialEnvData.cookies) cookieStr = initialEnvData.cookies.replace(/\r?\n|\r/g, '').trim();
+        if (initialEnvData.proxy) masterProxy = initialEnvData.proxy; // Bắt buộc lấy Proxy của Master
+        if (initialEnvData.ws_url) {
+          wsUrl = initialEnvData.ws_url.trim();
+          wsUrl = wsUrl.replace(/^https/i, "wss").replace(/^http/i, "ws");
+        }
+        logSuccess(`[WSS] Đã lấy được ws_url và Cookies từ Master cho ${cleanName}`);
+      } else {
+        throw new Error("Empty EnvData");
+      }
+    } catch (e) {
+      logError(`Master không trả về dữ liệu kết nối (${e.message})`);
+      safeEmitRadarResult({ channel, status: "ERROR" });
+      return;
+    }
+
+    if (!wsUrl || !cookieStr) {
+      logError("Không thể kết nối WSS: Thiếu ws_url hoặc cookie từ Master.");
+      safeEmitRadarResult({ channel, status: "ERROR" });
+      return;
+    }
+
     let proxyAgent;
-    if (proxy && proxy !== "local") {
-      let proxyStr = `http://${proxy}`;
-      const parts = proxy.split(":");
+    let activeProxy = masterProxy;
+    
+    if (activeProxy && activeProxy !== "local") {
+      let proxyStr = activeProxy;
+      if (!proxyStr.startsWith("http")) proxyStr = `http://${activeProxy}`;
+      const parts = activeProxy.replace("http://", "").split(":");
       if (parts.length === 4) {
         proxyStr = `http://${parts[2]}:${parts[3]}@${parts[0]}:${parts[1]}`;
       }
       proxyAgent = new HttpsProxyAgent(proxyStr);
       if (!agentCache[proxyStr]) agentCache[proxyStr] = proxyAgent;
       proxyAgent = agentCache[proxyStr];
-    } else {
-      proxyAgent = undefined;
+      
+      proxyUsage[activeProxy] = (proxyUsage[activeProxy] || 0) + 1;
+      assignedProxies[channel.username] = activeProxy;
     }
-
-    const cleanName = channel.username.startsWith("@")
-      ? channel.username.slice(1)
-      : channel.username;
 
     if (!fetchedRoomId) {
       try {
@@ -1113,46 +1142,12 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
       }
     };
 
-    let initialEnvData;
-    let cookieStr = "";
-    let wsUrl = "";
-    try {
-      logInfo(`[WSS] Đang xin Cookie và EnvData từ Master cho ${cleanName}...`);
-      initialEnvData = await requestSignFromMaster(
-        cleanName,
-        proxy !== "local" ? proxy : "",
-      );
-      if (initialEnvData) {
-        if (initialEnvData.cursor) cursor = initialEnvData.cursor;
-        if (initialEnvData.internal_ext)
-          internalExt = initialEnvData.internal_ext;
-        if (initialEnvData.userAgent) channelUA = initialEnvData.userAgent.replace(/\r?\n|\r/g, '').trim();
-        if (initialEnvData.cookies) cookieStr = initialEnvData.cookies.replace(/\r?\n|\r/g, '').trim();
-        if (initialEnvData.ws_url) {
-          wsUrl = initialEnvData.ws_url.trim();
-          wsUrl = wsUrl.replace(/^https/i, "wss").replace(/^http/i, "ws");
-        }
-        logSuccess(
-          `[WSS] Đã lấy được ws_url và Cookies từ Master cho ${cleanName}`,
-        );
-      } else {
-        throw new Error("Empty EnvData");
-      }
-    } catch (e) {
-      throw new Error(`Master không trả về dữ liệu kết nối (${e.message})`);
-    }
-
-    if (!wsUrl || !cookieStr) {
-      throw new Error(
-        "Không thể kết nối WSS: Thiếu ws_url hoặc cookie từ Master.",
-      );
-    }
-
     activeConnections[channel.username] = {
       isConnected: true,
       lastActive: Date.now(),
       roomId: fetchedRoomId,
       seqId: 1,
+      reqId: initialEnvData.reqId // Lưu reqId để báo dập kết nối
     };
 
     const tlsOptions = {
@@ -1362,6 +1357,11 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
 }
 
 function stopWebcast(user) {
+  const conn = activeConnections[user];
+  if (conn && conn.reqId && masterSocket && masterSocket.connected) {
+    masterSocket.emit("worker_report_disconnect", { reqId: conn.reqId });
+  }
+
   const realProxy = assignedProxies[user];
   if (realProxy) {
     proxyUsage[realProxy] = Math.max(0, (proxyUsage[realProxy] || 0) - 1);
@@ -1378,7 +1378,6 @@ function stopWebcast(user) {
   pendingChecks.delete(user);
   connectionLocks.delete(user);
 
-  const conn = activeConnections[user];
   if (!conn) return;
   delete activeConnections[user];
 
