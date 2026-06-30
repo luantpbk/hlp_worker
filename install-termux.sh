@@ -105,7 +105,13 @@ sed -i "s/\"workerName\": *\".*\"/\"workerName\": \"$WORKER_NAME\"/g" lc_config.
 sed -i "s/\"proxyCount\": *[0-9]*/\"proxyCount\": $PROXY_COUNT/g" lc_config.json || true
 
 # Cập nhật số lượng Local Load
-sed -i "s/\"localLoad\": *[0-9]*/\"localLoad\": $LOCAL_LOAD/g" lc_config.json || true
+if grep -q '"localLoad"' lc_config.json; then
+    sed -i "s/\"localLoad\": *[0-9]*/\"localLoad\": $LOCAL_LOAD/g" lc_config.json || true
+else
+    sed -i "s/}/,
+    \"localLoad\": $LOCAL_LOAD
+}/g" lc_config.json || true
+fi
 
 echo "SOCKET_SECRET=\"$ENV_CONTENT\"" > .env
 

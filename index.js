@@ -17,18 +17,16 @@ let config = {
   masterUrl: "http://localhost:3001",
   workerName: `LC_Worker_01`,
   proxyCount: 5,
-  useLocalNetwork: false,
-  loadPerProxy: 10,
-  localLoad: 50,
-};
+  };
+let masterMaxLoadPerProxy = 15;
 let currentDynamicMaxLoad = 0;
 
-let globalConnectTokens = config.proxyCount + (config.useLocalNetwork ? 1 : 0);
+let globalConnectTokens = config.proxyCount;
 let lastRefill = Date.now();
 setInterval(() => {
   const now = Date.now();
   if (now - lastRefill >= 2000) {
-    globalConnectTokens = config.proxyCount + (config.useLocalNetwork ? 1 : 0);
+    globalConnectTokens = config.proxyCount;
     lastRefill = now;
   }
 }, 500);
@@ -56,27 +54,15 @@ fs.watch(CONFIG_FILE, (eventType) => {
         const newConfig = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
         let isChanged = false;
 
-        if (
-          newConfig.localLoad !== undefined &&
-          config.localLoad !== newConfig.localLoad
-        ) {
-          config.localLoad = newConfig.localLoad;
-          isChanged = true;
-        }
+        
         if (
           newConfig.loadPerProxy !== undefined &&
-          config.loadPerProxy !== newConfig.loadPerProxy
+          masterMaxLoadPerProxy !== newConfig.loadPerProxy
         ) {
-          config.loadPerProxy = newConfig.loadPerProxy;
+          masterMaxLoadPerProxy = newConfig.loadPerProxy;
           isChanged = true;
         }
-        if (
-          newConfig.useLocalNetwork !== undefined &&
-          config.useLocalNetwork !== newConfig.useLocalNetwork
-        ) {
-          config.useLocalNetwork = newConfig.useLocalNetwork;
-          isChanged = true;
-        }
+        
         if (
           newConfig.proxyCount !== undefined &&
           config.proxyCount !== newConfig.proxyCount
@@ -110,7 +96,7 @@ let dynamicProxies = [];
 let zombieProxies = {};
 
 const agentCache = {};
-let localTaskQueue = [];
+let localTaskQueue = {};
 let proxyGeoData = {};
 
 function getGeoParams(countryCode) {
@@ -130,8 +116,6 @@ function getGeoParams(countryCode) {
   };
   return geoMap[countryCode?.toUpperCase()] || { lang: "en-US", region: "US" };
 }
-
-if (config.useLocalNetwork) proxyUsage["local"] = 0;
 
 function getShortProxy(p) {
   if (!p) return "Unknown";
@@ -179,10 +163,12 @@ function retireProxy(proxyStr) {
 function sendWorkerStatus() {
   if (masterSocket && masterSocket.connected) {
     const activeNames = Object.keys(activeConnections);
+    let allPendingTasks = Object.values(localTaskQueue).flat().map((c) => c.username);
+    let allConnecting = Array.from(connectionLocks.keys());
     let allPending = [
       ...Array.from(pendingChecks.keys()),
-      ...localTaskQueue.map((c) => c.username),
-      ...connectionQueue.map((item) => item.channel.username),
+      ...allPendingTasks,
+      ...allConnecting,
     ].filter((uname) => !activeNames.includes(uname));
     allPending = [...new Set(allPending)];
     masterSocket.emit("worker_status", {
@@ -190,6 +176,8 @@ function sendWorkerStatus() {
       runningChannels: activeNames,
       pendingChannels: allPending,
       proxyUsage: proxyUsage,
+      socketMap: { ...assignedProxies },
+      assignedProxiesList: dynamicProxies,
     });
   }
 }
@@ -207,13 +195,10 @@ setInterval(
 );
 
 function updateDynamicCapacity() {
-  let aliveProxyLoad =
-    config.useLocalNetwork && proxyHealth["local"]?.status === "SẴN SÀNG"
-      ? config.localLoad || 0
-      : 0;
+  let aliveProxyLoad = 0;
   for (let p of dynamicProxies) {
     if (proxyHealth[p]?.status === "SẴN SÀNG")
-      aliveProxyLoad += config.loadPerProxy || 0;
+      aliveProxyLoad += masterMaxLoadPerProxy || 0;
   }
 
   if (aliveProxyLoad !== currentDynamicMaxLoad) {
@@ -227,7 +212,6 @@ function updateDynamicCapacity() {
 
 async function checkProxyHealth() {
   let checkList = [...dynamicProxies];
-  if (config.useLocalNetwork) checkList.unshift("local");
   let currentHealth = {};
 
   const chunkSize = 5;
@@ -321,14 +305,12 @@ setInterval(checkProxyHealth, 5 * 60 * 1000);
 setTimeout(checkProxyHealth, 2000);
 
 function getNextAvailableProxy() {
-  let allProxies = config.useLocalNetwork
-    ? ["local", ...dynamicProxies]
-    : [...dynamicProxies];
+  let allProxies = [...dynamicProxies];
   let available = allProxies.filter((p) => {
     if (proxyCooldown[p] && Date.now() < proxyCooldown[p]) return false;
-    if (p !== "local" && (proxyStrikeCount[p] || 0) >= 4) return false;
-    const isReady = p === "local" || proxyHealth[p]?.status === "SẴN SÀNG";
-    const limit = p === "local" ? config.localLoad : config.loadPerProxy;
+    if ((proxyStrikeCount[p] || 0) >= 4) return false;
+    const isReady = proxyHealth[p]?.status === "SẴN SÀNG";
+    const limit = masterMaxLoadPerProxy;
     return isReady && (proxyUsage[p] || 0) < limit;
   });
   if (available.length === 0) return null;
@@ -398,6 +380,23 @@ function safeEmitRadarResult({ channel, status, proxy }) {
     masterSocket.emit("radar_result", { channel, status, proxy });
 }
 
+function convertProxyForMaster(proxyUrl) {
+  if (!proxyUrl || proxyUrl === "local") return proxyUrl;
+  try {
+    const url = new URL(proxyUrl);
+    const user = url.username || "";
+    const pass = url.password || "";
+    const host = url.hostname;
+    const port = url.port;
+    if (user && pass) {
+      return `${host}:${port}:${user}:${pass}`;
+    }
+    return `${host}:${port}`;
+  } catch (e) {
+    return proxyUrl;
+  }
+}
+
 // ==========================================
 // 💡 CẦU NỐI YÊU CẦU CHỮ KÝ TỪ MASTER (PC_SIGN)
 // ==========================================
@@ -420,8 +419,8 @@ function requestSignFromMaster(username, proxy) {
         masterSocket.off("worker_receive_sign", listener);
         if (response.error) reject(new Error(response.error));
         else {
-          response.data.reqId = reqId; // Lưu lại reqId để báo cáo khi ngắt
-          resolve(response.data);
+          response.reqId = reqId; // Lưu lại reqId để báo cáo khi ngắt
+          resolve(response);
         }
       }
     };
@@ -457,6 +456,15 @@ function connectToMaster() {
     );
   });
 
+  
+  masterSocket.on("master_config", (cfg) => {
+    if (cfg.MAX_LOAD_PER_PROFILE) {
+      masterMaxLoadPerProxy = parseInt(cfg.MAX_LOAD_PER_PROFILE);
+      console.log(`[ℹ️] Đã nhận cấu hình từ Master: Load/Proxy = ${masterMaxLoadPerProxy}`);
+      sendWorkerStatus();
+    }
+  });
+
   masterSocket.on("connect", () => {
     logSuccess("Đã kết nối tới Master Hub!");
     if (disconnectTimer) {
@@ -468,10 +476,8 @@ function connectToMaster() {
       name: config.workerName,
       type: "lc_worker",
       maxLoad: currentDynamicMaxLoad,
-      localLoad: config.localLoad,
-      loadPerProxy: config.loadPerProxy,
+      loadPerProxy: masterMaxLoadPerProxy,
       proxyCount: config.proxyCount,
-      useLocalNetwork: config.useLocalNetwork,
       runningChannels: Object.keys(activeConnections),
       pendingChannels: Array.from(pendingChecks.keys()),
       heldProxies: dynamicProxies,
@@ -479,6 +485,7 @@ function connectToMaster() {
       supportIPv6: hasIPv6Support,
       heldKeys: [],
       heldTiktoolKeys: [],
+      socketMap: { ...assignedProxies }, // 💡 Báo cáo map kênh → proxy cho master
     });
 
     const neededProxies = Math.max(
@@ -551,8 +558,8 @@ function connectToMaster() {
       "⏹️ Nhận lệnh DỪNG HẲN (STOP) từ Master. Rút điện toàn bộ hệ thống!",
     );
     workerPausedUntil = Infinity;
-    localTaskQueue = [];
-    connectionQueue = [];
+    localTaskQueue = {};
+    connectionQueue = {};
     const usersToClean = new Set([
       ...Object.keys(activeConnections),
       ...connectionLocks.keys(),
@@ -565,34 +572,49 @@ function connectToMaster() {
     connectionLocks.clear();
   });
 
-  masterSocket.on("process_task", (channel) => {
-    if (!channel || !channel.username) return;
-    const maxAllowedQueue = Math.max(20, currentDynamicMaxLoad * 2);
-    if (localTaskQueue.length >= maxAllowedQueue)
+  masterSocket.on("process_task", (taskData) => {
+    if (!taskData || !taskData.username) return;
+
+    // 💡 Tách checkProxy ra khỏi channel object
+    const checkProxy = taskData.checkProxy || null;
+    const channel = { ...taskData };
+    delete channel.checkProxy;
+
+    // 💡 Guard: chỉ nhận task khi đã có proxy (từ master) hoặc có proxy pool riêng
+    if (!checkProxy && dynamicProxies.length === 0) {
       return safeEmitRadarResult({ channel, status: "REQUEUE" });
+    }
+
+    const proxyKey = checkProxy;
+    if (!proxyKey) return safeEmitRadarResult({ channel, status: "SYSTEM_BUSY" });
+    if (!localTaskQueue[proxyKey]) localTaskQueue[proxyKey] = [];
+    
+    const maxAllowedQueue = Math.max(20, currentDynamicMaxLoad * 2);
+    let totalLocalTasks = Object.values(localTaskQueue).reduce((sum, arr) => sum + arr.length, 0);
+    
+    if (totalLocalTasks >= maxAllowedQueue)
+      return safeEmitRadarResult({ channel, status: "REQUEUE" });
+      
+    const isInLocalQueue = Object.values(localTaskQueue).some(arr => arr.some(c => c.username === channel.username));
+    const isInConnectionQueue = Object.values(connectionQueue).some(arr => arr.some(item => item.channel.username === channel.username));
+    
     if (
-      !localTaskQueue.some((c) => c.username === channel.username) &&
+      !isInLocalQueue &&
       !pendingChecks.has(channel.username) &&
       !activeConnections[channel.username] &&
       !connectionLocks.has(channel.username) &&
-      !connectionQueue.some(
-        (item) => item.channel.username === channel.username,
-      )
+      !isInConnectionQueue
     ) {
-      localTaskQueue.push(channel);
+      // 💡 Lưu kèm proxy được master chỉ định
+      localTaskQueue[proxyKey].push({ ...channel, _masterProxy: checkProxy });
     }
   });
 
   masterSocket.on("force_update_config", (newCfg) => {
-    if (newCfg.useLocalNetwork !== undefined)
-      config.useLocalNetwork =
-        newCfg.useLocalNetwork === true || newCfg.useLocalNetwork === "true";
     if (newCfg.proxyCount !== undefined)
       config.proxyCount = parseInt(newCfg.proxyCount);
-    if (newCfg.localLoad !== undefined)
-      config.localLoad = parseInt(newCfg.localLoad);
     if (newCfg.loadPerProxy !== undefined)
-      config.loadPerProxy = parseInt(newCfg.loadPerProxy);
+      masterMaxLoadPerProxy = parseInt(newCfg.loadPerProxy);
 
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 4));
     sendWorkerStatus();
@@ -604,8 +626,8 @@ function connectToMaster() {
     if (reason === "io server disconnect") masterSocket.connect();
     else {
       disconnectTimer = setTimeout(() => {
-        localTaskQueue = [];
-        connectionQueue = [];
+        localTaskQueue = {};
+        connectionQueue = {};
         const usersToClean = new Set([
           ...Object.keys(activeConnections),
           ...connectionLocks.keys(),
@@ -626,63 +648,39 @@ function connectToMaster() {
   });
 }
 
-let isProcessingQueue = false;
+let isProcessingQueue = {};
 setInterval(async () => {
-  if (
-    isProcessingQueue ||
-    Date.now() < workerPausedUntil ||
-    localTaskQueue.length === 0
-  )
-    return;
+  if (Date.now() < workerPausedUntil) return;
 
-  const maxPendingSigns =
-    (dynamicProxies.length + (config.useLocalNetwork ? 1 : 0)) * 3;
-  if (connectionQueue.length >= maxPendingSigns) {
-    return;
-  }
+  const allProxies = [...new Set([
+    ...dynamicProxies, 
+    ...Object.keys(localTaskQueue), 
+    ...Object.keys(connectionQueue)
+  ])].filter(p => p && p !== "local");
+  for (const proxyKey of allProxies) {
+    if (!localTaskQueue[proxyKey] || localTaskQueue[proxyKey].length === 0) continue;
+    if (isProcessingQueue[proxyKey]) continue;
 
-  isProcessingQueue = true;
+    // Giới hạn số lượng checkLive và pending trong connectionQueue phù hợp với mỗi luồng proxy (<= 3)
+    const currentConnectionLen = connectionQueue[proxyKey] ? connectionQueue[proxyKey].length : 0;
+    if (currentConnectionLen >= 3) continue;
 
-  try {
-    const currentActive = Object.keys(activeConnections).length;
-    const totalIntendedLoad =
-      currentActive + connectionQueue.length + pendingChecks.size;
-
-    if (
-      currentDynamicMaxLoad === 0 ||
-      totalIntendedLoad >= currentDynamicMaxLoad
-    ) {
-      while (localTaskQueue.length > 0)
-        safeEmitRadarResult({
-          channel: localTaskQueue.shift(),
-          status: "REQUEUE",
-        });
-      return;
-    }
-
-    const maxConcurrentChecks =
-      (dynamicProxies.length + (config.useLocalNetwork ? 1 : 0)) * 2;
-    const availableCheckSlots = maxConcurrentChecks - pendingChecks.size;
-    const loadShortage = currentDynamicMaxLoad - totalIntendedLoad;
-    const actualSlots = Math.min(availableCheckSlots, loadShortage);
-
-    if (actualSlots <= 0) return;
-
-    const tasksToProcess = Math.min(actualSlots, localTaskQueue.length);
-    const delayStep = 10000 / Math.max(1, tasksToProcess);
-
-    for (let i = 0; i < tasksToProcess; i++) {
-      const channel = localTaskQueue.splice(0, 1)[0];
+    isProcessingQueue[proxyKey] = true;
+    try {
+      const taskItem = localTaskQueue[proxyKey].shift();
+      const { _masterProxy, ...channel } = taskItem;
       pendingChecks.set(channel.username, Date.now());
+      
+      // Delay random xíu để tản tải HTTP request
       setTimeout(
         () => {
-          executeTask(channel);
+          executeTask(channel, _masterProxy);
         },
-        i * delayStep + Math.floor(Math.random() * 1000),
+        Math.floor(Math.random() * 1000)
       );
+    } finally {
+      isProcessingQueue[proxyKey] = false;
     }
-  } finally {
-    isProcessingQueue = false;
   }
 }, 1000);
 
@@ -720,6 +718,7 @@ async function checkLiveStatus(username, proxy) {
 
       let res;
       try {
+        fetchPromise.catch(() => {});
         res = await Promise.race([fetchPromise, hardTimeout]);
       } finally {
         clearTimeout(timeoutHandle);
@@ -812,63 +811,59 @@ async function checkLiveStatus(username, proxy) {
 // ==========================================
 // 💡 HÀNG ĐỢI KẾT NỐI & GIỚI HẠN TỐC ĐỘ (RATE LIMIT LOCAL SIGN)
 // ==========================================
-let connectionQueue = [];
-let isConnecting = false;
-let pendingSigns = 0; // Đếm số luồng đang xin chữ ký Python
+let connectionQueue = {};
+let isConnecting = {};
+let pendingSigns = {}; // Đếm số lượng đang xin chữ ký Python
+
 setInterval(() => {
-  const maxConcurrentSigns =
-    (dynamicProxies.length + (config.useLocalNetwork ? 1 : 0)) * 2;
+  if (Date.now() < workerPausedUntil) return;
+  const allProxies = [...new Set([
+    ...dynamicProxies, 
+    ...Object.keys(localTaskQueue), 
+    ...Object.keys(connectionQueue)
+  ])].filter(p => p && p !== "local");
+  for (const proxyKey of allProxies) {
+    if (isConnecting[proxyKey] || !connectionQueue[proxyKey] || connectionQueue[proxyKey].length === 0) continue;
+    if ((pendingSigns[proxyKey] || 0) >= 1) continue; // 💡 YÊU CẦU CỦA USER: Chạy LẦN LƯỢT từng kênh một trên mỗi proxy (không nhồi nhiều tab)
 
-  if (
-    isConnecting ||
-    connectionQueue.length === 0 ||
-    Date.now() < workerPausedUntil ||
-    pendingSigns >= maxConcurrentSigns // Giới hạn số luồng gọi Python cùng lúc
-  )
-    return;
+    isConnecting[proxyKey] = true;
+    try {
+      const item = connectionQueue[proxyKey][0];
+      const { channel, proxy, roomId: fetchedRoomId } = item;
 
-  isConnecting = true;
-  try {
-    const item = connectionQueue[0];
-    const { channel, proxy, roomId: fetchedRoomId } = item;
+      if (!connectionLocks.has(channel.username) || activeConnections[channel.username]) {
+        connectionQueue[proxyKey].shift();
+        if (!connectionLocks.has(channel.username)) stopWebcast(channel.username);
+        isConnecting[proxyKey] = false;
+        continue;
+      }
+      
+      if (globalConnectTokens <= 0) {
+        isConnecting[proxyKey] = false;
+        continue;
+      }
 
-    if (!connectionLocks.has(channel.username)) {
-      connectionQueue.shift();
-      stopWebcast(channel.username);
-      isConnecting = false;
-      return;
+      connectionQueue[proxyKey].shift();
+      globalConnectTokens--;
+      pendingSigns[proxyKey] = (pendingSigns[proxyKey] || 0) + 1;
+
+      // 💡 Chạy ngầm việc cắm Socket, xong việc thì giảm biến đếm
+      startWebcast(channel, proxy, fetchedRoomId).finally(() => {
+        pendingSigns[proxyKey]--;
+      });
+
+      // 💡 GỠ BỎ NÚT THẮT CỔ CHAI: Chỉ cần đợi 3s - 4s cho kênh tiếp theo
+      const totalDelay = 3000 + Math.floor(Math.random() * 1000);
+      setTimeout(() => {
+        isConnecting[proxyKey] = false;
+      }, totalDelay);
+    } catch (err) {
+      isConnecting[proxyKey] = false;
     }
-    if (activeConnections[channel.username]) {
-      connectionQueue.shift();
-      isConnecting = false;
-      return;
-    }
-    if (globalConnectTokens <= 0) {
-      isConnecting = false;
-      return;
-    }
-
-    connectionQueue.shift();
-    globalConnectTokens--;
-    pendingSigns++;
-
-    // 💡 Chạy ngầm việc cắm Socket, xong việc thì giảm biến đếm
-    startWebcast(channel, proxy, fetchedRoomId).finally(() => {
-      pendingSigns--;
-    });
-
-    // 💡 GỠ BỎ NÚT THẮT CỔ CHAI: Chỉ cần đợi 3s - 4s cho kênh tiếp theo
-    const totalDelay = 3000 + Math.floor(Math.random() * 1000);
-    setTimeout(() => {
-      isConnecting = false;
-    }, totalDelay);
-  } catch (err) {
-    if (connectionQueue.length > 0) connectionQueue.shift();
-    isConnecting = false;
   }
 }, 100);
 
-async function executeTask(channel) {
+async function executeTask(channel, masterProxy) {
   if (
     activeConnections[channel.username] ||
     connectionLocks.has(channel.username)
@@ -877,27 +872,27 @@ async function executeTask(channel) {
     return;
   }
 
-  let availableProxies = [];
-  if (config.useLocalNetwork) {
-    if (!proxyCooldown["local"] || Date.now() > proxyCooldown["local"]) {
-      availableProxies.push("local");
-    }
-  }
-  for (let p of dynamicProxies) {
-    if (
-      proxyHealth[p]?.status === "SẴN SÀNG" &&
-      (!proxyCooldown[p] || Date.now() > proxyCooldown[p]) &&
-      (proxyStrikeCount[p] || 0) < 4
-    )
-      availableProxies.push(p);
-  }
+  let checkProxy = masterProxy;
 
-  if (availableProxies.length === 0) {
-    pendingChecks.delete(channel.username);
-    return safeEmitRadarResult({ channel, status: "SYSTEM_BUSY" });
+  if (!checkProxy) {
+    // 💡 Fallback: Tự chọn proxy nếu master không cung cấp (backward compat)
+    let availableProxies = [];
+    
+    for (let p of dynamicProxies) {
+      if (
+        proxyHealth[p]?.status === "SẴN SÀNG" &&
+        (!proxyCooldown[p] || Date.now() > proxyCooldown[p]) &&
+        (proxyStrikeCount[p] || 0) < 4
+      )
+        availableProxies.push(p);
+    }
+
+    if (availableProxies.length === 0) {
+      pendingChecks.delete(channel.username);
+      return safeEmitRadarResult({ channel, status: "SYSTEM_BUSY" });
+    }
+    checkProxy = availableProxies[Math.floor(Math.random() * availableProxies.length)];
   }
-  const checkProxy =
-    availableProxies[Math.floor(Math.random() * availableProxies.length)];
 
   try {
     let rawStatus = await checkLiveStatus(channel.username, checkProxy);
@@ -961,9 +956,11 @@ async function executeTask(channel) {
     if (status === "LIVE") {
       safeEmitRadarResult({ channel, status: "LIVE" });
       connectionLocks.set(channel.username, Date.now());
-      connectionQueue.push({
+      const proxyKey = checkProxy;
+      if (!connectionQueue[proxyKey]) connectionQueue[proxyKey] = [];
+      connectionQueue[proxyKey].push({
         channel,
-        proxy: "master", // Sẽ lấy từ Master
+        proxy: checkProxy, // Truyền đúng proxy Master thay vì hardcoded "master"
         roomId: fetchedRoomId,
       });
     }
@@ -994,7 +991,8 @@ const fetchRoomId = async (username, proxyAgent) => {
   };
   if (proxyAgent) opts.httpsAgent = proxyAgent;
   const res = await axios(opts);
-  const roomMatch = res.data.match(/"(?:roomId|room_id)"\s*:\s*"?([1-9]\d+)"?/);
+  const dataStr = typeof res.data === "string" ? res.data : JSON.stringify(res.data || "");
+  const roomMatch = dataStr.match(/"(?:roomId|room_id)"\s*:\s*"?([1-9]\d+)"?/);
   if (roomMatch) return roomMatch[1];
   throw new Error("Cannot find roomId");
 };
@@ -1011,7 +1009,7 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
   if (activeConnections[channel.username]) return;
 
   logInfo(
-    `Bắt đầu WSS (Thuần WebSocket) socket ${channel.username} qua Local Sign`,
+    `Bắt đầu WSS (Thuần WebSocket) socket ${channel.username} qua Proxy`,
   );
   try {
     const cleanName = channel.username.startsWith("@")
@@ -1022,40 +1020,50 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
     let cookieStr = "";
     let wsUrl = "";
     let masterProxy = "";
+    let cursor = "";
+    let internalExt = "";
+    const generatedHeaders = headerGenerator.getHeaders();
+    let channelUA = generatedHeaders["user-agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/120.0.0.0";
     
     try {
       logInfo(`[WSS] Đang xin Cookie và EnvData từ Master cho ${cleanName}...`);
-      initialEnvData = await requestSignFromMaster(cleanName, "");
+      initialEnvData = await requestSignFromMaster(cleanName, convertProxyForMaster(proxy));
       if (initialEnvData) {
-        if (initialEnvData.cursor) cursor = initialEnvData.cursor;
-        if (initialEnvData.internal_ext) internalExt = initialEnvData.internal_ext;
-        if (initialEnvData.userAgent) channelUA = initialEnvData.userAgent.replace(/\r?\n|\r/g, '').trim();
-        if (initialEnvData.cookies) cookieStr = initialEnvData.cookies.replace(/\r?\n|\r/g, '').trim();
-        if (initialEnvData.proxy) masterProxy = initialEnvData.proxy; // Bắt buộc lấy Proxy của Master
-        if (initialEnvData.ws_url) {
-          wsUrl = initialEnvData.ws_url.trim();
+        let envDataPayload = initialEnvData.envData || {};
+        if (envDataPayload.cursor) cursor = envDataPayload.cursor;
+        if (envDataPayload.internal_ext) internalExt = envDataPayload.internal_ext;
+        if (envDataPayload.userAgent) channelUA = envDataPayload.userAgent.replace(/\r?\n|\r/g, '').trim();
+        if (envDataPayload.cookies) cookieStr = envDataPayload.cookies.replace(/\r?\n|\r/g, '').trim();
+        if (envDataPayload.proxy) masterProxy = envDataPayload.proxy; // Bắt buộc lấy Proxy của Master
+        else masterProxy = proxy; // BẢN VÁ: lấy tham số truyền vào nếu PC_Sign không trả về proxy
+        if (envDataPayload.ws_url) {
+          wsUrl = envDataPayload.ws_url.trim();
           wsUrl = wsUrl.replace(/^https/i, "wss").replace(/^http/i, "ws");
+          logSuccess(`[WSS] Đã lấy được ws_url và Cookies từ Master cho ${cleanName}`);
+        } else {
+          logError(`[WSS] Master trả về EnvData nhưng KHÔNG có ws_url cho ${cleanName} (Có thể do lỗi Captcha trên pc_sign)`);
         }
-        logSuccess(`[WSS] Đã lấy được ws_url và Cookies từ Master cho ${cleanName}`);
       } else {
         throw new Error("Empty EnvData");
       }
     } catch (e) {
       logError(`Master không trả về dữ liệu kết nối (${e.message})`);
       safeEmitRadarResult({ channel, status: "ERROR" });
+      stopWebcast(channel.username);
       return;
     }
 
     if (!wsUrl || !cookieStr) {
       logError("Không thể kết nối WSS: Thiếu ws_url hoặc cookie từ Master.");
       safeEmitRadarResult({ channel, status: "ERROR" });
+      stopWebcast(channel.username);
       return;
     }
 
     let proxyAgent;
     let activeProxy = masterProxy;
     
-    if (activeProxy && activeProxy !== "local") {
+    if (activeProxy) {
       let proxyStr = activeProxy;
       if (!proxyStr.startsWith("http")) proxyStr = `http://${activeProxy}`;
       const parts = activeProxy.replace("http://", "").split(":");
@@ -1078,20 +1086,15 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
       } catch (e) {
         logError(`[WSS] Không lấy được Room ID cho ${cleanName}`);
         safeEmitRadarResult({ channel, status: "ERROR" });
+        stopWebcast(channel.username);
         return;
       }
     }
 
-    let cursor = "";
-    let internalExt = "";
     let currentViewers = 0;
     const deviceId = String(
       Math.floor(Math.random() * 9000000000000000000) + 1000000000000000000,
     );
-    const generatedHeaders = headerGenerator.getHeaders();
-    let channelUA =
-      generatedHeaders["user-agent"] ||
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/120.0.0.0";
 
     const catchTreasureBox = (
       data,
@@ -1180,6 +1183,13 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
 
     ws.on("open", () => {
       logSuccess(`[WSS] ${channel.username} KẾT NỐI WEBSOCKET THÀNH CÔNG!`);
+      // 💡 Báo cáo socket mở cho Master để tracking số kênh thực
+      if (masterSocket?.connected) {
+        masterSocket.emit("worker_socket_opened", {
+          username: channel.username,
+          proxy: activeProxy || "local",
+        });
+      }
       try {
         let imEnterRoomMsg = null;
         if (proto.WebcastImEnterRoomMessage) {
@@ -1312,11 +1322,11 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
       stopWebcast(channel.username);
       
       // Nếu proxy lỗi thì tăng biến đếm
-      if (proxy && proxy !== "local") {
-        proxyFailCount[proxy] = (proxyFailCount[proxy] || 0) + 1;
-        if (proxyFailCount[proxy] >= 5 && proxyHealth[proxy]) {
-          proxyHealth[proxy].status = "LỖI KẾT NỐI LIÊN TỤC";
-          proxyCooldown[proxy] = Date.now() + 180000;
+      if (activeProxy && activeProxy !== "local") {
+        proxyFailCount[activeProxy] = (proxyFailCount[activeProxy] || 0) + 1;
+        if (proxyFailCount[activeProxy] >= 5 && proxyHealth[activeProxy]) {
+          proxyHealth[activeProxy].status = "LỖI KẾT NỐI LIÊN TỤC";
+          proxyCooldown[activeProxy] = Date.now() + 180000;
         }
       }
       setTimeout(() => safeEmitRadarResult({ channel, status: "REQUEUE" }), 3000);
@@ -1344,11 +1354,12 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
     });
   } catch (e) {
     logError(`Lỗi kết nối cho ${channel.username}: ${e.message}`);
-    if (proxy && proxy !== "local") {
-      proxyFailCount[proxy] = (proxyFailCount[proxy] || 0) + 1;
-      if (proxyFailCount[proxy] >= 5) {
-        proxyHealth[proxy].status = "LỖI KẾT NỐI LIÊN TỤC";
-        proxyCooldown[proxy] = Date.now() + 180000;
+    let p = masterProxy || proxy;
+    if (p && p !== "local") {
+      proxyFailCount[p] = (proxyFailCount[p] || 0) + 1;
+      if (proxyFailCount[p] >= 5) {
+        if(proxyHealth[p]) proxyHealth[p].status = "LỖI KẾT NỐI LIÊN TỤC";
+        proxyCooldown[p] = Date.now() + 180000;
       }
     }
     safeEmitRadarResult({ channel, status: "ERROR" });
@@ -1363,6 +1374,15 @@ function stopWebcast(user) {
   }
 
   const realProxy = assignedProxies[user];
+
+  // 💡 Báo cáo socket đóng cho Master để cập nhật proxySocketCount
+  if (masterSocket?.connected) {
+    masterSocket.emit("worker_socket_closed", {
+      username: user,
+      proxy: realProxy,
+    });
+  }
+
   if (realProxy) {
     proxyUsage[realProxy] = Math.max(0, (proxyUsage[realProxy] || 0) - 1);
     delete assignedProxies[user];
@@ -1447,10 +1467,8 @@ setInterval(() => {
     Object.keys(activeConnections).length +
     connectionQueue.length +
     pendingChecks.size;
-  const safeLoad = config.loadPerProxy > 0 ? config.loadPerProxy : 15;
-  const realMaxLoad =
-    config.proxyCount * safeLoad +
-    (config.useLocalNetwork ? config.localLoad || 0 : 0);
+  const safeLoad = masterMaxLoadPerProxy > 0 ? masterMaxLoadPerProxy : 15;
+  const realMaxLoad = config.proxyCount * safeLoad;
   const isMaxLoad = currentTotalLoad >= realMaxLoad * 0.9;
 
   for (let user in activeConnections) {
@@ -1478,7 +1496,6 @@ setInterval(() => {
   }
 
   const realUsage = {};
-  if (config.useLocalNetwork) realUsage["local"] = 0;
   for (let p of dynamicProxies) realUsage[p] = 0;
   for (let user in assignedProxies) {
     const p = assignedProxies[user];
@@ -1555,6 +1572,7 @@ function handleShutdown(signal) {
     let proxiesToReturn = [...dynamicProxies];
     if (proxiesToReturn.length > 0)
       masterSocket.emit("worker_return_proxies", proxiesToReturn);
+    masterSocket.emit("worker_intentional_disconnect");
   }
   setTimeout(() => {
     process.exit(0);
@@ -1568,3 +1586,4 @@ process.on("unhandledRejection", (reason) => {
   logError(`[CRASH PROTECT]: ${reason}`);
 });
 process.on("SIGTERM", handleShutdown);
+process.on("SIGINT", handleShutdown);
