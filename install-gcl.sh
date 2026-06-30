@@ -9,7 +9,6 @@ echo "=============================="
 WORKER_NAME="$1"
 ENV_CONTENT="$2"
 PROXY_COUNT="$3"
-LOCAL_LOAD="$4"
 
 if [ -z "$WORKER_NAME" ] || [ -z "$ENV_CONTENT" ] || [ -z "$PROXY_COUNT" ] || [ -z "$LOCAL_LOAD" ]; then
     echo "Usage:"

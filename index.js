@@ -226,7 +226,7 @@ async function checkProxyHealth() {
         }
 
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000);
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
         let options = { signal: controller.signal };
 
         if (p !== "local") {
@@ -255,7 +255,7 @@ async function checkProxyHealth() {
           );
           clearTimeout(timeoutId);
 
-          if (healthRes.status === 200 || healthRes.status === 204) {
+          if (healthRes.status >= 200 && healthRes.status < 600) {
             currentHealth[p] = {
               status: "SẴN SÀNG",
               country: proxyGeoData[p] || "VN",
@@ -1422,6 +1422,7 @@ setInterval(() => {
     if (conn && conn.ws && conn.ws.readyState === 1) {
       // 1 = OPEN
       try {
+        if (conn.ws.ping) conn.ws.ping(); // Gửi Ping protocol TCP để giữ connection với Proxy/Cloudflare (Fix lỗi 1006)
         let hbMsg = proto.HeartBeatMessage.encode({
           roomId: conn.roomId || "0",
           sendPacketSeqId: String(conn.seqId || 1),
