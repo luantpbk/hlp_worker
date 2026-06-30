@@ -10,7 +10,7 @@ WORKER_NAME="$1"
 ENV_CONTENT="$2"
 PROXY_COUNT="$3"
 
-if [ -z "$WORKER_NAME" ] || [ -z "$ENV_CONTENT" ] || [ -z "$PROXY_COUNT" ] || [ -z "$LOCAL_LOAD" ]; then
+if [ -z "$WORKER_NAME" ] || [ -z "$ENV_CONTENT" ] || [ -z "$PROXY_COUNT" ]; then
     echo "Usage:"
     echo "bash install-termux.sh <worker_name> <socket_secret> <proxy_count> <local_load>"
     exit 1
