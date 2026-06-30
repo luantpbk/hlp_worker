@@ -17,7 +17,7 @@ let config = {
   masterUrl: "http://localhost:3001",
   workerName: `LC_Worker_01`,
   proxyCount: 5,
-  };
+};
 let masterMaxLoadPerProxy = 15;
 let currentDynamicMaxLoad = 0;
 
@@ -54,7 +54,6 @@ fs.watch(CONFIG_FILE, (eventType) => {
         const newConfig = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
         let isChanged = false;
 
-        
         if (
           newConfig.loadPerProxy !== undefined &&
           masterMaxLoadPerProxy !== newConfig.loadPerProxy
@@ -62,7 +61,7 @@ fs.watch(CONFIG_FILE, (eventType) => {
           masterMaxLoadPerProxy = newConfig.loadPerProxy;
           isChanged = true;
         }
-        
+
         if (
           newConfig.proxyCount !== undefined &&
           config.proxyCount !== newConfig.proxyCount
@@ -163,7 +162,9 @@ function retireProxy(proxyStr) {
 function sendWorkerStatus() {
   if (masterSocket && masterSocket.connected) {
     const activeNames = Object.keys(activeConnections);
-    let allPendingTasks = Object.values(localTaskQueue).flat().map((c) => c.username);
+    let allPendingTasks = Object.values(localTaskQueue)
+      .flat()
+      .map((c) => c.username);
     let allConnecting = Array.from(connectionLocks.keys());
     let allPending = [
       ...Array.from(pendingChecks.keys()),
@@ -352,7 +353,10 @@ function getCachedAgent(proxyStr) {
   if (!agentCache[proxyUrl]) {
     agentCache[proxyUrl] = new HttpsProxyAgent(proxyUrl, {
       keepAlive: true,
-      keepAliveMsecs: 60000,
+      keepAliveMsecs: 15000, // Giảm xuống 15 giây
+      // maxSockets: 256, // Tránh thắt cổ chai số lượng kết nối trên mỗi proxy
+      // maxFreeSockets: 256,
+      timeout: 30000, // Đặt timeout cứng ở tầng socket proxy
       rejectUnauthorized: false,
     });
   }
@@ -456,11 +460,12 @@ function connectToMaster() {
     );
   });
 
-  
   masterSocket.on("master_config", (cfg) => {
     if (cfg.MAX_LOAD_PER_PROFILE) {
       masterMaxLoadPerProxy = parseInt(cfg.MAX_LOAD_PER_PROFILE);
-      console.log(`[ℹ️] Đã nhận cấu hình từ Master: Load/Proxy = ${masterMaxLoadPerProxy}`);
+      console.log(
+        `[ℹ️] Đã nhận cấu hình từ Master: Load/Proxy = ${masterMaxLoadPerProxy}`,
+      );
       sendWorkerStatus();
     }
   });
@@ -586,18 +591,26 @@ function connectToMaster() {
     }
 
     const proxyKey = checkProxy;
-    if (!proxyKey) return safeEmitRadarResult({ channel, status: "SYSTEM_BUSY" });
+    if (!proxyKey)
+      return safeEmitRadarResult({ channel, status: "SYSTEM_BUSY" });
     if (!localTaskQueue[proxyKey]) localTaskQueue[proxyKey] = [];
-    
+
     const maxAllowedQueue = Math.max(20, currentDynamicMaxLoad * 2);
-    let totalLocalTasks = Object.values(localTaskQueue).reduce((sum, arr) => sum + arr.length, 0);
-    
+    let totalLocalTasks = Object.values(localTaskQueue).reduce(
+      (sum, arr) => sum + arr.length,
+      0,
+    );
+
     if (totalLocalTasks >= maxAllowedQueue)
       return safeEmitRadarResult({ channel, status: "REQUEUE" });
-      
-    const isInLocalQueue = Object.values(localTaskQueue).some(arr => arr.some(c => c.username === channel.username));
-    const isInConnectionQueue = Object.values(connectionQueue).some(arr => arr.some(item => item.channel.username === channel.username));
-    
+
+    const isInLocalQueue = Object.values(localTaskQueue).some((arr) =>
+      arr.some((c) => c.username === channel.username),
+    );
+    const isInConnectionQueue = Object.values(connectionQueue).some((arr) =>
+      arr.some((item) => item.channel.username === channel.username),
+    );
+
     if (
       !isInLocalQueue &&
       !pendingChecks.has(channel.username) &&
@@ -652,17 +665,22 @@ let isProcessingQueue = {};
 setInterval(async () => {
   if (Date.now() < workerPausedUntil) return;
 
-  const allProxies = [...new Set([
-    ...dynamicProxies, 
-    ...Object.keys(localTaskQueue), 
-    ...Object.keys(connectionQueue)
-  ])].filter(p => p && p !== "local");
+  const allProxies = [
+    ...new Set([
+      ...dynamicProxies,
+      ...Object.keys(localTaskQueue),
+      ...Object.keys(connectionQueue),
+    ]),
+  ].filter((p) => p && p !== "local");
   for (const proxyKey of allProxies) {
-    if (!localTaskQueue[proxyKey] || localTaskQueue[proxyKey].length === 0) continue;
+    if (!localTaskQueue[proxyKey] || localTaskQueue[proxyKey].length === 0)
+      continue;
     if (isProcessingQueue[proxyKey]) continue;
 
     // Giới hạn số lượng checkLive và pending trong connectionQueue phù hợp với mỗi luồng proxy (<= 3)
-    const currentConnectionLen = connectionQueue[proxyKey] ? connectionQueue[proxyKey].length : 0;
+    const currentConnectionLen = connectionQueue[proxyKey]
+      ? connectionQueue[proxyKey].length
+      : 0;
     if (currentConnectionLen >= 3) continue;
 
     isProcessingQueue[proxyKey] = true;
@@ -670,13 +688,13 @@ setInterval(async () => {
       const taskItem = localTaskQueue[proxyKey].shift();
       const { _masterProxy, ...channel } = taskItem;
       pendingChecks.set(channel.username, Date.now());
-      
+
       // Delay random xíu để tản tải HTTP request
       setTimeout(
         () => {
           executeTask(channel, _masterProxy);
         },
-        Math.floor(Math.random() * 1000)
+        Math.floor(Math.random() * 1000),
       );
     } finally {
       isProcessingQueue[proxyKey] = false;
@@ -817,13 +835,20 @@ let pendingSigns = {}; // Đếm số lượng đang xin chữ ký Python
 
 setInterval(() => {
   if (Date.now() < workerPausedUntil) return;
-  const allProxies = [...new Set([
-    ...dynamicProxies, 
-    ...Object.keys(localTaskQueue), 
-    ...Object.keys(connectionQueue)
-  ])].filter(p => p && p !== "local");
+  const allProxies = [
+    ...new Set([
+      ...dynamicProxies,
+      ...Object.keys(localTaskQueue),
+      ...Object.keys(connectionQueue),
+    ]),
+  ].filter((p) => p && p !== "local");
   for (const proxyKey of allProxies) {
-    if (isConnecting[proxyKey] || !connectionQueue[proxyKey] || connectionQueue[proxyKey].length === 0) continue;
+    if (
+      isConnecting[proxyKey] ||
+      !connectionQueue[proxyKey] ||
+      connectionQueue[proxyKey].length === 0
+    )
+      continue;
     if ((pendingSigns[proxyKey] || 0) >= 1) continue; // 💡 YÊU CẦU CỦA USER: Chạy LẦN LƯỢT từng kênh một trên mỗi proxy (không nhồi nhiều tab)
 
     isConnecting[proxyKey] = true;
@@ -831,13 +856,17 @@ setInterval(() => {
       const item = connectionQueue[proxyKey][0];
       const { channel, proxy, roomId: fetchedRoomId } = item;
 
-      if (!connectionLocks.has(channel.username) || activeConnections[channel.username]) {
+      if (
+        !connectionLocks.has(channel.username) ||
+        activeConnections[channel.username]
+      ) {
         connectionQueue[proxyKey].shift();
-        if (!connectionLocks.has(channel.username)) stopWebcast(channel.username);
+        if (!connectionLocks.has(channel.username))
+          stopWebcast(channel.username);
         isConnecting[proxyKey] = false;
         continue;
       }
-      
+
       if (globalConnectTokens <= 0) {
         isConnecting[proxyKey] = false;
         continue;
@@ -877,7 +906,7 @@ async function executeTask(channel, masterProxy) {
   if (!checkProxy) {
     // 💡 Fallback: Tự chọn proxy nếu master không cung cấp (backward compat)
     let availableProxies = [];
-    
+
     for (let p of dynamicProxies) {
       if (
         proxyHealth[p]?.status === "SẴN SÀNG" &&
@@ -891,7 +920,8 @@ async function executeTask(channel, masterProxy) {
       pendingChecks.delete(channel.username);
       return safeEmitRadarResult({ channel, status: "SYSTEM_BUSY" });
     }
-    checkProxy = availableProxies[Math.floor(Math.random() * availableProxies.length)];
+    checkProxy =
+      availableProxies[Math.floor(Math.random() * availableProxies.length)];
   }
 
   try {
@@ -991,7 +1021,8 @@ const fetchRoomId = async (username, proxyAgent) => {
   };
   if (proxyAgent) opts.httpsAgent = proxyAgent;
   const res = await axios(opts);
-  const dataStr = typeof res.data === "string" ? res.data : JSON.stringify(res.data || "");
+  const dataStr =
+    typeof res.data === "string" ? res.data : JSON.stringify(res.data || "");
   const roomMatch = dataStr.match(/"(?:roomId|room_id)"\s*:\s*"?([1-9]\d+)"?/);
   if (roomMatch) return roomMatch[1];
   throw new Error("Cannot find roomId");
@@ -1008,9 +1039,7 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
   }
   if (activeConnections[channel.username]) return;
 
-  logInfo(
-    `Bắt đầu WSS (Thuần WebSocket) socket ${channel.username} qua Proxy`,
-  );
+  logInfo(`Bắt đầu WSS (Thuần WebSocket) socket ${channel.username} qua Proxy`);
   try {
     const cleanName = channel.username.startsWith("@")
       ? channel.username.slice(1)
@@ -1023,25 +1052,38 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
     let cursor = "";
     let internalExt = "";
     const generatedHeaders = headerGenerator.getHeaders();
-    let channelUA = generatedHeaders["user-agent"] || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/120.0.0.0";
-    
+    let channelUA =
+      generatedHeaders["user-agent"] ||
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/120.0.0.0";
+
     try {
       logInfo(`[WSS] Đang xin Cookie và EnvData từ Master cho ${cleanName}...`);
-      initialEnvData = await requestSignFromMaster(cleanName, convertProxyForMaster(proxy));
+      initialEnvData = await requestSignFromMaster(
+        cleanName,
+        convertProxyForMaster(proxy),
+      );
       if (initialEnvData) {
         let envDataPayload = initialEnvData.envData || {};
         if (envDataPayload.cursor) cursor = envDataPayload.cursor;
-        if (envDataPayload.internal_ext) internalExt = envDataPayload.internal_ext;
-        if (envDataPayload.userAgent) channelUA = envDataPayload.userAgent.replace(/\r?\n|\r/g, '').trim();
-        if (envDataPayload.cookies) cookieStr = envDataPayload.cookies.replace(/\r?\n|\r/g, '').trim();
-        if (envDataPayload.proxy) masterProxy = envDataPayload.proxy; // Bắt buộc lấy Proxy của Master
+        if (envDataPayload.internal_ext)
+          internalExt = envDataPayload.internal_ext;
+        if (envDataPayload.userAgent)
+          channelUA = envDataPayload.userAgent.replace(/\r?\n|\r/g, "").trim();
+        if (envDataPayload.cookies)
+          cookieStr = envDataPayload.cookies.replace(/\r?\n|\r/g, "").trim();
+        if (envDataPayload.proxy)
+          masterProxy = envDataPayload.proxy; // Bắt buộc lấy Proxy của Master
         else masterProxy = proxy; // BẢN VÁ: lấy tham số truyền vào nếu PC_Sign không trả về proxy
         if (envDataPayload.ws_url) {
           wsUrl = envDataPayload.ws_url.trim();
           wsUrl = wsUrl.replace(/^https/i, "wss").replace(/^http/i, "ws");
-          logSuccess(`[WSS] Đã lấy được ws_url và Cookies từ Master cho ${cleanName}`);
+          logSuccess(
+            `[WSS] Đã lấy được ws_url và Cookies từ Master cho ${cleanName}`,
+          );
         } else {
-          logError(`[WSS] Master trả về EnvData nhưng KHÔNG có ws_url cho ${cleanName} (Có thể do lỗi Captcha trên pc_sign)`);
+          logError(
+            `[WSS] Master trả về EnvData nhưng KHÔNG có ws_url cho ${cleanName} (Có thể do lỗi Captcha trên pc_sign)`,
+          );
         }
       } else {
         throw new Error("Empty EnvData");
@@ -1062,7 +1104,7 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
 
     let proxyAgent;
     let activeProxy = masterProxy;
-    
+
     if (activeProxy) {
       let proxyStr = activeProxy;
       if (!proxyStr.startsWith("http")) proxyStr = `http://${activeProxy}`;
@@ -1073,7 +1115,7 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
       proxyAgent = new HttpsProxyAgent(proxyStr);
       if (!agentCache[proxyStr]) agentCache[proxyStr] = proxyAgent;
       proxyAgent = agentCache[proxyStr];
-      
+
       proxyUsage[activeProxy] = (proxyUsage[activeProxy] || 0) + 1;
       assignedProxies[channel.username] = activeProxy;
     }
@@ -1150,7 +1192,7 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
       lastActive: Date.now(),
       roomId: fetchedRoomId,
       seqId: 1,
-      reqId: initialEnvData.reqId // Lưu reqId để báo dập kết nối
+      reqId: initialEnvData.reqId, // Lưu reqId để báo dập kết nối
     };
 
     const tlsOptions = {
@@ -1315,12 +1357,14 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
     });
 
     ws.on("unexpected-response", (request, response) => {
-      const msg = response.headers["handshake-msg"] || `Unexpected ${response.statusCode}`;
+      const msg =
+        response.headers["handshake-msg"] ||
+        `Unexpected ${response.statusCode}`;
       logError(`[WSS] @${channel.username} Bị từ chối kết nối: ${msg}`);
-      
+
       request.abort();
       stopWebcast(channel.username);
-      
+
       // Nếu proxy lỗi thì tăng biến đếm
       if (activeProxy && activeProxy !== "local") {
         proxyFailCount[activeProxy] = (proxyFailCount[activeProxy] || 0) + 1;
@@ -1329,7 +1373,10 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
           proxyCooldown[activeProxy] = Date.now() + 180000;
         }
       }
-      setTimeout(() => safeEmitRadarResult({ channel, status: "REQUEUE" }), 3000);
+      setTimeout(
+        () => safeEmitRadarResult({ channel, status: "REQUEUE" }),
+        3000,
+      );
     });
 
     ws.on("error", (err) => {
@@ -1346,11 +1393,28 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
       logWarn(
         `[WSS] ${channel.username} Đóng kết nối (Code: ${code}, Reason: ${reasonStr})`,
       );
+
       stopWebcast(channel.username);
-      setTimeout(
-        () => safeEmitRadarResult({ channel, status: "REQUEUE" }),
-        3000,
-      );
+
+      // Phân loại lỗi để có chiến lược phục hồi
+      if (code === 1000 || code === 1006) {
+        logInfo(
+          `[WSS] Đang thử khôi phục kết nối nhanh cho ${channel.username}...`,
+        );
+        // Gọi lại startWebcast hoặc đẩy vào một hàng đợi ưu tiên cao (Fast-lane queue)
+        // Tùy chỉnh trạng thái để master không tính là một kênh chết hoàn toàn
+        setTimeout(
+          () => {
+            safeEmitRadarResult({ channel, status: "FAST_RECONNECT" });
+          },
+          1500 + Math.random() * 2000,
+        ); // Thêm jitter ngẫu nhiên để tránh thundering herd
+      } else {
+        setTimeout(
+          () => safeEmitRadarResult({ channel, status: "REQUEUE" }),
+          3000,
+        );
+      }
     });
   } catch (e) {
     logError(`Lỗi kết nối cho ${channel.username}: ${e.message}`);
@@ -1358,7 +1422,7 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
     if (p && p !== "local") {
       proxyFailCount[p] = (proxyFailCount[p] || 0) + 1;
       if (proxyFailCount[p] >= 5) {
-        if(proxyHealth[p]) proxyHealth[p].status = "LỖI KẾT NỐI LIÊN TỤC";
+        if (proxyHealth[p]) proxyHealth[p].status = "LỖI KẾT NỐI LIÊN TỤC";
         proxyCooldown[p] = Date.now() + 180000;
       }
     }
