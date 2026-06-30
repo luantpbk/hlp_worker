@@ -12,7 +12,7 @@ PROXY_COUNT="$3"
 
 # Kiểm tra đảm bảo truyền đủ 4 tham số
 if [ -z "$WORKER_NAME" ] || [ -z "$ENV_CONTENT" ] || [ -z "$PROXY_COUNT" ]; then
-    echo \"Usage: bash install-debian.sh <worker_name> <env_content> <proxy_count>\"
+    echo "Usage: bash install-debian.sh <worker_name> <env_content> <proxy_count>"
     exit 1
 fi
 
