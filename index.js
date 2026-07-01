@@ -94,6 +94,9 @@ let hasIPv6Support = false;
 let dynamicProxies = [];
 let zombieProxies = {};
 
+let proxyLocaleMap = {};
+let proxyTimezoneMap = {};
+
 const agentCache = {};
 let localTaskQueue = {};
 
@@ -497,10 +500,13 @@ function connectToMaster() {
   masterSocket.on("worker_receive_proxies", (assignedProxiesArr) => {
     assignedProxiesArr.forEach((p) => {
       const proxyStr = typeof p === "string" ? p : p.proxy;
-      // -- THÊM VÀO ĐÂY -- Lấy locale do Master gửi
       const locale = typeof p === "string" ? "en-US" : p.locale || "en-US";
+      const timezone =
+        typeof p === "string"
+          ? "America/New_York"
+          : p.timezone || "America/New_York"; // <-- CHÈN THÊM
       proxyLocaleMap[proxyStr] = locale;
-      // -----------------
+      proxyTimezoneMap[proxyStr] = timezone;
       if (!dynamicProxies.includes(proxyStr)) {
         dynamicProxies.push(proxyStr);
         proxyStrikeCount[proxyStr] = 0;
@@ -701,8 +707,14 @@ async function checkLiveStatus(username, proxy) {
   while (retries >= 0) {
     try {
       const proxyLocale = proxyLocaleMap[proxy] || "en-US";
+      const proxyTz = proxyTimezoneMap[proxy] || "America/New_York"; // <-- Kéo múi giờ ra
+      const langCode = proxyLocale.split("-")[0];
+
       const fetchPromise = gotScraping({
-        url: `https://www.tiktok.com/${urlUsername}/live`,
+        url: `https://www.tiktok.com/${urlUsername}/live?lang=${langCode}&tz_name=${encodeURIComponent(proxyTz)}`,
+        headers: {
+          Cookie: `timezone_name=${proxyTz};`,
+        },
         proxyUrl: proxyUrlGot,
         timeout: { request: 12000 },
         throwHttpErrors: false,
@@ -1001,9 +1013,13 @@ const headerGenerator = new HeaderGenerator({
   operatingSystems: ["windows", "macos"],
 });
 const fetchRoomId = async (username, proxyAgent) => {
+  const proxyLocale = proxyLocaleMap[proxy] || "en-US";
+  const proxyTz = proxyTimezoneMap[proxy] || "America/New_York"; // <-- Kéo múi giờ ra
+  const langCode = proxyLocale.split("-")[0];
   const opts = {
-    url: `https://www.tiktok.com/@${username}/live`,
+    url: `https://www.tiktok.com/@${username}/live?lang=${langCode}&tz_name=${encodeURIComponent(proxyTz)}`,
     headers: {
+      Cookie: `timezone_name=${proxyTz};`,
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       "Accept-Language": "en-US,en;q=0.9",
