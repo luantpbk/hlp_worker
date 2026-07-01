@@ -96,7 +96,6 @@ let zombieProxies = {};
 
 const agentCache = {};
 let localTaskQueue = {};
-let proxyGeoData = {};
 
 function getGeoParams(countryCode) {
   const geoMap = {
@@ -237,19 +236,6 @@ async function checkProxyHealth() {
         }
 
         try {
-          if (p !== "local" && !proxyGeoData[p]) {
-            try {
-              const geoRes = await axios.get(
-                "http://ip-api.com/json/?fields=countryCode",
-                options,
-              );
-              if (geoRes.data && geoRes.data.countryCode)
-                proxyGeoData[p] = geoRes.data.countryCode;
-              else proxyGeoData[p] = "VN";
-            } catch (geoErr) {
-              proxyGeoData[p] = "UNKNOWN";
-            }
-          }
           const healthRes = await axios.get(
             "https://clients3.google.com/generate_204",
             options,
@@ -259,7 +245,7 @@ async function checkProxyHealth() {
           if (healthRes.status >= 200 && healthRes.status < 600) {
             currentHealth[p] = {
               status: "SẴN SÀNG",
-              country: proxyGeoData[p] || "VN",
+              country: proxyLocaleMap[p] || "en-US",
             };
             proxyFailCount[p] = 0;
           } else throw new Error(`HTTP Lỗi ${healthRes.status}`);
@@ -354,8 +340,8 @@ function getCachedAgent(proxyStr) {
     agentCache[proxyUrl] = new HttpsProxyAgent(proxyUrl, {
       keepAlive: true,
       keepAliveMsecs: 15000, // Giảm xuống 15 giây
-      // maxSockets: 256, // Tránh thắt cổ chai số lượng kết nối trên mỗi proxy
-      // maxFreeSockets: 256,
+      maxSockets: 256, // Tránh thắt cổ chai số lượng kết nối trên mỗi proxy
+      maxFreeSockets: 256,
       timeout: 30000, // Đặt timeout cứng ở tầng socket proxy
       rejectUnauthorized: false,
     });
@@ -371,7 +357,6 @@ function cleanupProxyData(proxy) {
     } catch (e) {}
     delete agentCache[proxyUrl];
   }
-  delete proxyGeoData[proxy];
   delete proxyHealth[proxy];
   delete proxyUsage[proxy];
   delete proxyFailCount[proxy];
@@ -512,6 +497,10 @@ function connectToMaster() {
   masterSocket.on("worker_receive_proxies", (assignedProxiesArr) => {
     assignedProxiesArr.forEach((p) => {
       const proxyStr = typeof p === "string" ? p : p.proxy;
+      // -- THÊM VÀO ĐÂY -- Lấy locale do Master gửi
+      const locale = typeof p === "string" ? "en-US" : p.locale || "en-US";
+      proxyLocaleMap[proxyStr] = locale;
+      // -----------------
       if (!dynamicProxies.includes(proxyStr)) {
         dynamicProxies.push(proxyStr);
         proxyStrikeCount[proxyStr] = 0;
@@ -529,6 +518,9 @@ function connectToMaster() {
     retireProxy(deadProxy);
     if (newProxy) {
       const pStr = typeof newProxy === "string" ? newProxy : newProxy.proxy;
+      const locale =
+        typeof newProxy === "string" ? "en-US" : newProxy.locale || "en-US";
+      proxyLocaleMap[pStr] = locale;
       if (zombieProxies[pStr]) delete zombieProxies[pStr];
       if (!dynamicProxies.includes(pStr)) dynamicProxies.push(pStr);
       proxyStrikeCount[pStr] = 0;
@@ -708,8 +700,7 @@ async function checkLiveStatus(username, proxy) {
   let retries = 1;
   while (retries >= 0) {
     try {
-      const currentCountry = proxyGeoData[proxy] || "VN";
-      const geo = getGeoParams(currentCountry);
+      const proxyLocale = proxyLocaleMap[proxy] || "en-US";
       const fetchPromise = gotScraping({
         url: `https://www.tiktok.com/${urlUsername}/live`,
         proxyUrl: proxyUrlGot,
@@ -720,7 +711,7 @@ async function checkLiveStatus(username, proxy) {
         headerGeneratorOptions: {
           browsers: [{ name: "chrome", minVersion: 120 }],
           devices: ["desktop"],
-          locales: [geo.lang, "en-US"],
+          locales: [proxyLocale, "en-US"],
         },
       });
 
@@ -1397,7 +1388,7 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
       stopWebcast(channel.username);
 
       // Phân loại lỗi để có chiến lược phục hồi
-      if (code === 1000 || code === 1006) {
+      if (code === 1006) {
         logInfo(
           `[WSS] Đang thử khôi phục kết nối nhanh cho ${channel.username}...`,
         );
@@ -1613,23 +1604,6 @@ async function checkIPv6Capability() {
 checkIPv6Capability().then(() => {
   connectToMaster();
 });
-
-async function checkLocalGeo() {
-  try {
-    const res = await axios.get("http://ip-api.com/json/?fields=countryCode", {
-      timeout: 5000,
-    });
-    if (res.data && res.data.countryCode) {
-      proxyGeoData["local"] = res.data.countryCode;
-      logSuccess(`🌍 Đã xác định vị trí mạng Local: ${res.data.countryCode}`);
-    } else {
-      proxyGeoData["local"] = "US";
-    }
-  } catch (e) {
-    proxyGeoData["local"] = "US";
-  }
-}
-checkLocalGeo();
 
 function handleShutdown(signal) {
   logWarn(`⚠️ Nhận lệnh ${signal}. Đang trả tài nguyên...`);
