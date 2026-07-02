@@ -1210,219 +1210,214 @@ async function startWebcast(channel, proxy, fetchedRoomId) {
       ecdhCurve: "X25519:P-256:P-384:P-521",
       secureProtocol: "TLSv1_2_method",
     };
-
-    const ws = new WebSocket(wsUrl, {
-      agent: proxyAgent,
-      ...tlsOptions,
-      headers: {
-        Pragma: "no-cache",
-        "Cache-Control": "no-cache",
-        "User-Agent": channelUA,
-        Cookie: cookieStr,
-        Origin: "https://www.tiktok.com",
-        Referer: `https://www.tiktok.com/@${cleanName}/live`,
-        "Accept-Encoding": "gzip, deflate, br",
-        "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
-        "Sec-WebSocket-Extensions":
-          "permessage-deflate; client_max_window_bits",
-      },
-    });
-
-    activeConnections[channel.username].ws = ws;
-
-    ws.on("open", () => {
-      logSuccess(`[WSS] ${channel.username} KẾT NỐI WEBSOCKET THÀNH CÔNG!`);
-      // 💡 Báo cáo socket mở cho Master để tracking số kênh thực
-      if (masterSocket?.connected) {
-        masterSocket.emit("worker_socket_opened", {
-          username: channel.username,
-          proxy: activeProxy || "local",
-        });
-      }
-      try {
-        let imEnterRoomMsg = null;
-        if (proto.WebcastImEnterRoomMessage) {
-          let uniqueIdStr = "";
-          for (let i = 0; i < 18; i++)
-            uniqueIdStr += Math.floor(Math.random() * 10);
-          if (uniqueIdStr.startsWith("0"))
-            uniqueIdStr = "1" + uniqueIdStr.slice(1);
-
-          imEnterRoomMsg = proto.WebcastImEnterRoomMessage.encode({
-            roomId: fetchedRoomId || "0",
-            scene: "1",
-            enterSource: "37",
-            accountType: "0",
-            filterWelcomeMsg: "0",
-            isAnchorContinueKeepMsg: false,
-            liveId: "12",
-            enterUniqueId: uniqueIdStr,
-            roomTag: "",
-            liveRegion: "",
-            identity: "audience",
-            cursor: "",
-          }).finish();
-        } else {
-          imEnterRoomMsg = new Uint8Array();
+    let localReconnectCount = 0;
+    const connectWebSocket = () => {
+      // Nếu kênh đã bị giải phóng, không tự nối lại nữa
+      if (!activeConnections[channel.username]) return;
+      const ws = new WebSocket(wsUrl, {
+        agent: proxyAgent,
+        ...tlsOptions,
+        headers: {
+          Pragma: "no-cache",
+          "Cache-Control": "no-cache",
+          "User-Agent": channelUA,
+          Cookie: cookieStr,
+          Origin: "https://www.tiktok.com",
+          Referer: `https://www.tiktok.com/@${cleanName}/live`,
+          "Accept-Encoding": "gzip, deflate, br",
+          "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
+          "Sec-WebSocket-Extensions":
+            "permessage-deflate; client_max_window_bits",
+        },
+      });
+      activeConnections[channel.username].ws = ws;
+      activeConnections[channel.username].missedPings = 0;
+      activeConnections[channel.username].seqId = 1;
+      ws.on("pong", () => {
+        if (activeConnections[channel.username]) {
+          activeConnections[channel.username].missedPings = 0;
         }
-
-        const enterFrame = proto.WebcastPushFrame.encode({
-          seqId: "0",
-          logId: "0",
-          payloadEncoding: "pb",
-          payloadType: "im_enter_room",
-          payload: imEnterRoomMsg,
-          service: "0",
-          method: "0",
-          headers: [],
-        }).finish();
-        ws.send(enterFrame);
-      } catch (e) {
-        logError(
-          `[WSS] Lỗi khi khởi tạo luồng data cho ${channel.username}: ${e.message}`,
-        );
-      }
-    });
-
-    ws.on("message", (data) => {
-      try {
-        const frame = proto.WebcastPushFrame.decode(new Uint8Array(data));
-        if (frame.payloadType === "msg") {
-          let payloadBuffer = frame.payload;
-          const isGzip =
-            frame.headers &&
-            frame.headers.some(
-              (h) => h.key === "compress_type" && h.value === "gzip",
-            );
-          if (isGzip) {
-            payloadBuffer = zlib.unzipSync(payloadBuffer);
+      });
+      ws.on("open", () => {
+        logSuccess(`[WSS] ${channel.username} KẾT NỐI WEBSOCKET THÀNH CÔNG!`);
+        if (masterSocket?.connected) {
+          masterSocket.emit("worker_socket_opened", {
+            username: channel.username,
+            proxy: activeProxy || "local",
+          });
+        }
+        try {
+          let imEnterRoomMsg = null;
+          if (proto.WebcastImEnterRoomMessage) {
+            let uniqueIdStr = "";
+            for (let i = 0; i < 18; i++)
+              uniqueIdStr += Math.floor(Math.random() * 10);
+            if (uniqueIdStr.startsWith("0"))
+              uniqueIdStr = "1" + uniqueIdStr.slice(1);
+            imEnterRoomMsg = proto.WebcastImEnterRoomMessage.encode({
+              roomId: fetchedRoomId || "0",
+              scene: "1",
+              enterSource: "37",
+              accountType: "0",
+              filterWelcomeMsg: "0",
+              isAnchorContinueKeepMsg: false,
+              liveId: "12",
+              enterUniqueId: uniqueIdStr,
+              roomTag: "",
+              liveRegion: "",
+              identity: "audience",
+              cursor: "",
+            }).finish();
+          } else {
+            imEnterRoomMsg = new Uint8Array();
           }
-          const fetchResult =
-            proto.ProtoMessageFetchResult.decode(payloadBuffer);
-
-          if (fetchResult.needAck && frame.logId) {
-            try {
-              const internalExt = fetchResult.internalExt || "";
-              const ackBuffer = proto.WebcastPushFrame.encode({
-                logId: frame.logId || "0",
-                seqId: "0",
-                payloadEncoding: "pb",
-                payloadType: "ack",
-                payload: Buffer.from(internalExt, "utf8"),
-                service: "0",
-                method: "0",
-                headers: [],
-              }).finish();
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(ackBuffer);
-              }
-            } catch (ackErr) {
-              logWarn(`[WSS] Lỗi gửi ACK: ${ackErr.message}`);
+          const enterFrame = proto.WebcastPushFrame.encode({
+            seqId: "0",
+            logId: "0",
+            payloadEncoding: "pb",
+            payloadType: "im_enter_room",
+            payload: imEnterRoomMsg,
+            service: "0",
+            method: "0",
+            headers: [],
+          }).finish();
+          ws.send(enterFrame);
+        } catch (e) {
+          logError(
+            `[WSS] Lỗi khi khởi tạo luồng data cho ${channel.username}: ${e.message}`,
+          );
+        }
+      });
+      ws.on("message", (data) => {
+        if (activeConnections[channel.username]) {
+          activeConnections[channel.username].lastMessageReceived = Date.now();
+        }
+        try {
+          const frame = proto.WebcastPushFrame.decode(new Uint8Array(data));
+          if (frame.payloadType === "msg") {
+            let payloadBuffer = frame.payload;
+            const isGzip =
+              frame.headers &&
+              frame.headers.some(
+                (h) => h.key === "compress_type" && h.value === "gzip",
+              );
+            if (isGzip) {
+              payloadBuffer = zlib.unzipSync(payloadBuffer);
             }
-          }
-
-          if (fetchResult && fetchResult.messages) {
-            for (let msg of fetchResult.messages) {
-              if (
-                msg.method === "WebcastEnvelopeMessage" ||
-                msg.method === "WebcastTreasureBoxMessage"
-              ) {
-                try {
-                  let payloadObj = null;
-                  const protoMethod =
-                    msg.method === "WebcastTreasureBoxMessage"
-                      ? "WebcastEnvelopeMessage"
-                      : msg.method;
-                  if (proto[protoMethod]) {
-                    payloadObj = proto[protoMethod].decode(msg.payload);
-                  }
-                  if (payloadObj) {
-                    const msgName =
+            const fetchResult =
+              proto.ProtoMessageFetchResult.decode(payloadBuffer);
+            if (fetchResult.needAck && frame.logId) {
+              try {
+                const internalExt = fetchResult.internalExt || "";
+                const ackBuffer = proto.WebcastPushFrame.encode({
+                  logId: frame.logId || "0",
+                  seqId: "0",
+                  payloadEncoding: "pb",
+                  payloadType: "ack",
+                  payload: Buffer.from(internalExt, "utf8"),
+                  service: "0",
+                  method: "0",
+                  headers: [],
+                }).finish();
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(ackBuffer);
+                }
+              } catch (ackErr) {}
+            }
+            if (fetchResult && fetchResult.messages) {
+              for (let msg of fetchResult.messages) {
+                if (
+                  msg.method === "WebcastEnvelopeMessage" ||
+                  msg.method === "WebcastTreasureBoxMessage"
+                ) {
+                  try {
+                    let payloadObj = null;
+                    const protoMethod =
                       msg.method === "WebcastTreasureBoxMessage"
-                        ? "treasureBox"
-                        : "envelope";
-                    catchTreasureBox(
-                      payloadObj,
-                      channel,
-                      msgName,
-                      fetchedRoomId,
-                      currentViewers,
-                    );
-                  }
-                } catch (decErr) {
-                  logWarn(`[⚠️] Lỗi decode ${msg.method}: ${decErr.message}`);
+                        ? "WebcastEnvelopeMessage"
+                        : msg.method;
+                    if (proto[protoMethod]) {
+                      payloadObj = proto[protoMethod].decode(msg.payload);
+                    }
+                    if (payloadObj) {
+                      const msgName =
+                        msg.method === "WebcastTreasureBoxMessage"
+                          ? "treasureBox"
+                          : "envelope";
+                      catchTreasureBox(
+                        payloadObj,
+                        channel,
+                        msgName,
+                        fetchedRoomId,
+                        currentViewers,
+                      );
+                    }
+                  } catch (decErr) {}
                 }
               }
             }
           }
+        } catch (err) {}
+      });
+      ws.on("unexpected-response", (request, response) => {
+        const msg =
+          response.headers["handshake-msg"] ||
+          `Unexpected ${response.statusCode}`;
+        logError(`[WSS] @${channel.username} Bị từ chối kết nối: ${msg}`);
+        request.abort();
+        stopWebcast(channel.username);
+        if (activeProxy && activeProxy !== "local") {
+          proxyFailCount[activeProxy] = (proxyFailCount[activeProxy] || 0) + 1;
+          if (proxyFailCount[activeProxy] >= 5 && proxyHealth[activeProxy]) {
+            proxyHealth[activeProxy].status = "LỖI KẾT NỐI LIÊN TỤC";
+            proxyCooldown[activeProxy] = Date.now() + 180000;
+          }
         }
-      } catch (err) {
-        logWarn(
-          `[WSS] Lỗi xử lý message WebcastPushFrame từ ${channel.username}: ${err.message}`,
-        );
-      }
-    });
-
-    ws.on("unexpected-response", (request, response) => {
-      const msg =
-        response.headers["handshake-msg"] ||
-        `Unexpected ${response.statusCode}`;
-      logError(`[WSS] @${channel.username} Bị từ chối kết nối: ${msg}`);
-
-      request.abort();
-      stopWebcast(channel.username);
-
-      // Nếu proxy lỗi thì tăng biến đếm
-      if (activeProxy && activeProxy !== "local") {
-        proxyFailCount[activeProxy] = (proxyFailCount[activeProxy] || 0) + 1;
-        if (proxyFailCount[activeProxy] >= 5 && proxyHealth[activeProxy]) {
-          proxyHealth[activeProxy].status = "LỖI KẾT NỐI LIÊN TỤC";
-          proxyCooldown[activeProxy] = Date.now() + 180000;
-        }
-      }
-      setTimeout(
-        () => safeEmitRadarResult({ channel, status: "REQUEUE" }),
-        3000,
-      );
-    });
-
-    ws.on("error", (err) => {
-      logError(`[WSS] ${channel.username} Lỗi: ${err.message}`);
-      stopWebcast(channel.username);
-      setTimeout(
-        () => safeEmitRadarResult({ channel, status: "REQUEUE" }),
-        3000,
-      );
-    });
-
-    ws.on("close", (code, reason) => {
-      const reasonStr = reason ? reason.toString() : "No reason provided";
-      logWarn(
-        `[WSS] ${channel.username} Đóng kết nối (Code: ${code}, Reason: ${reasonStr})`,
-      );
-
-      stopWebcast(channel.username);
-
-      // Phân loại lỗi để có chiến lược phục hồi
-      if (code === 1006) {
-        logInfo(
-          `[WSS] Đang thử khôi phục kết nối nhanh cho ${channel.username}...`,
-        );
-        // Gọi lại startWebcast hoặc đẩy vào một hàng đợi ưu tiên cao (Fast-lane queue)
-        // Tùy chỉnh trạng thái để master không tính là một kênh chết hoàn toàn
-        setTimeout(
-          () => {
-            safeEmitRadarResult({ channel, status: "FAST_RECONNECT" });
-          },
-          1500 + Math.random() * 2000,
-        ); // Thêm jitter ngẫu nhiên để tránh thundering herd
-      } else {
         setTimeout(
           () => safeEmitRadarResult({ channel, status: "REQUEUE" }),
           3000,
         );
-      }
-    });
+      });
+      ws.on("error", (err) => {
+        logError(`[WSS] ${channel.username} Lỗi: ${err.message}`);
+        // Để sự kiện close bên dưới lo phần reconnect
+      });
+      ws.on("close", (code, reason) => {
+        const reasonStr = reason ? reason.toString() : "No reason provided";
+        logWarn(
+          `[WSS] ${channel.username} Đóng kết nối (Code: ${code}, Reason: ${reasonStr})`,
+        );
+        // Dọn dẹp listener cũ
+        try {
+          ws.removeAllListeners();
+          ws.terminate();
+        } catch (e) {}
+        // Nếu kênh bị Master hoặc thuật toán Dọn Rác cưỡng chế đóng, hủy cắm lại
+        if (!activeConnections[channel.username]) return;
+        // Nếu rớt mạng ngẫu nhiên (1006, 1000, 1001, 1005), tự động cắm lại bằng parameters cũ
+        if (code === 1006 || code === 1000 || code === 1001 || code === 1005) {
+          if (localReconnectCount < 10) {
+            localReconnectCount++;
+            logInfo(
+              `[WSS] Đang TỰ ĐỘNG NỐI LẠI CỤC BỘ cho ${channel.username} (Lần ${localReconnectCount}/10)...`,
+            );
+            setTimeout(connectWebSocket, 1500 + Math.random() * 2000);
+            return;
+          } else {
+            logWarn(
+              `[WSS] ${channel.username} Hết lượt nối lại cục bộ. Báo REQUEUE về Master.`,
+            );
+          }
+        }
+        stopWebcast(channel.username);
+        setTimeout(
+          () => safeEmitRadarResult({ channel, status: "REQUEUE" }),
+          3000,
+        );
+      });
+    };
+    // Gọi hàm lần đầu tiên
+    connectWebSocket();
   } catch (e) {
     logError(`Lỗi kết nối cho ${channel.username}: ${e.message}`);
     let p = masterProxy || proxy;
@@ -1491,9 +1486,17 @@ setInterval(() => {
   for (let username in activeConnections) {
     const conn = activeConnections[username];
     if (conn && conn.ws && conn.ws.readyState === 1) {
-      // 1 = OPEN
+      if (conn.missedPings >= 4) {
+        // Tầm 40 giây không phản hồi Pong
+        logWarn(
+          `[WSS] Socket ${username} bị treo ngầm (Không phản hồi Ping). Đang giải phóng...`,
+        );
+        stopWebcast(username);
+        continue;
+      }
+      conn.missedPings = (conn.missedPings || 0) + 1;
       try {
-        if (conn.ws.ping) conn.ws.ping(); // Gửi Ping protocol TCP để giữ connection với Proxy/Cloudflare (Fix lỗi 1006)
+        if (conn.ws.ping) conn.ws.ping(); // Gửi Ping protocol TCP
         let hbMsg = proto.HeartBeatMessage.encode({
           roomId: conn.roomId || "0",
           sendPacketSeqId: String(conn.seqId || 1),
@@ -1545,18 +1548,33 @@ setInterval(() => {
 
   for (let user in activeConnections) {
     const conn = activeConnections[user];
+
+    // 1. Kênh không có rương >= 90 phút => Giải phóng ngay (bỏ điều kiện isMaxLoad)
     if (now - (conn.lastActive || now) > 90 * 60 * 1000) {
-      if (isMaxLoad) {
-        logWarn(`✂️ Cắt bỏ Socket Zombie [${user}] sau 90 phút.`);
-        stopWebcast(user);
-        safeEmitRadarResult({
-          channel: { username: user },
-          status: "COOLDOWN",
-          proxy: assignedProxies[user],
-        });
-      } else {
-        conn.lastActive = now - 80 * 60 * 1000;
-      }
+      logWarn(
+        `✂️ Giải phóng kênh [${user}] do không có rương >15 xu trong 90 phút.`,
+      );
+      stopWebcast(user);
+      safeEmitRadarResult({
+        channel: { username: user },
+        status: "COOLDOWN",
+        proxy: assignedProxies[user],
+      });
+      continue;
+    }
+
+    // 2. Kênh rác / Treo tĩnh (Không hề có bất kỳ tín hiệu tin nhắn nào lọt về trong 5 phút) => Giải phóng
+    if (now - (conn.lastMessageReceived || now) > 5 * 60 * 1000) {
+      logWarn(
+        `✂️ Giải phóng kênh rác [${user}] do không có luồng data chat/view trong 5 phút.`,
+      );
+      stopWebcast(user);
+      safeEmitRadarResult({
+        channel: { username: user },
+        status: "COOLDOWN",
+        proxy: assignedProxies[user],
+      });
+      continue;
     }
   }
 
